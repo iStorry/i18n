@@ -64,7 +64,7 @@ describe('JSON loader hot reload', () => {
     try {
       await writeUsers('{ "greeting": "broken", ');
       await vi.waitFor(() => expect(error).toHaveBeenCalled(), waitOpts);
-      expect(String(error.mock.calls[0][0])).toMatch(/pl\/users\.json/);
+      expect(String(error.mock.calls[0][0])).toContain(join('pl', 'users.json'));
       expect(i18n.t('users.greeting', { locale: 'pl', args: { name: 'A' } })).toBe('Cześć, A!');
       // and recovers once the file is fixed
       await writeUsers({ greeting: 'Naprawione, {name}' });
