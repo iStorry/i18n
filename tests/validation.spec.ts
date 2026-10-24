@@ -1,8 +1,8 @@
-import { BadRequestException, Logger } from '@nestjs/common';
+import { BadRequestException, Logger, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { StandardSchemaV1 } from '@standard-schema/spec';
 import { Type } from 'class-transformer';
-import { IsEmail, IsIn, IsNotEmpty, Max, MinLength, ValidateNested } from 'class-validator';
+import { IsEmail, IsIn, IsNotEmpty, Matches, Max, MinLength, ValidateNested } from 'class-validator';
 import {
   I18nContext,
   I18nMissingKeyError,
@@ -418,5 +418,117 @@ describe('validation messages: arguments, groups and malformed input', () => {
       expect(received[0]).toMatchObject({ code: 'too_small', minimum: 18, message: 'too small: 18' });
       expect(received[0].path).toEqual(['age']);
     });
+  });
+});
+
+describe('validation messages: two decorators of the same type on a property', () => {
+  let context: I18nContext;
+
+  const catalogs = {
+    en: {
+      validation: { matches: '{path} must match {constraint1}' },
+      users: {
+        digit: '{path} needs a digit',
+        uppercase: '{path} needs an uppercase letter',
+        pinLength: '{path} needs 4 characters',
+      },
+    },
+  };
+
+  beforeAll(async () => {
+    const ref = await Test.createTestingModule({
+      imports: [I18nModule.forRoot({ loader: new InMemoryI18nLoader(catalogs), missingKey: 'throw' })],
+    }).compile();
+    context = ref.get(I18nContext);
+  });
+
+  const messages = (pipe: ValidationPipe, metatype: new () => object, body: object) =>
+    context.run('en', () =>
+      pipe.transform(body, { type: 'body', metatype }).then(
+        () => [],
+        (e: BadRequestException) => (e.getResponse() as { message: string[] }).message,
+      ),
+    );
+
+  class PasswordDto {
+    @Matches(/\d/, { message: i18nValidationMessage('users.digit') })
+    @Matches(/[A-Z]/, { message: i18nValidationMessage('users.uppercase') })
+    password: string;
+  }
+
+  it('translates the key of the decorator that failed', async () => {
+    const pipe = new I18nValidationPipe();
+    expect(await messages(pipe, PasswordDto, { password: 'Abcdefgh' })).toEqual([
+      'password needs a digit',
+    ]);
+    expect(await messages(pipe, PasswordDto, { password: 'abcdefg1' })).toEqual([
+      'password needs an uppercase letter',
+    ]);
+  });
+
+  it('uses the constraints of the decorator that failed for the default message', async () => {
+    class CodeDto {
+      @Matches(/^[a-z]/)
+      @Matches(/\d$/)
+      code: string;
+    }
+    const pipe = new I18nValidationPipe();
+    expect(await messages(pipe, CodeDto, { code: 'a' })).toEqual(['code must match /\\d$/']);
+    expect(await messages(pipe, CodeDto, { code: '1' })).toEqual(['code must match /^[a-z]/']);
+  });
+
+  it('tells the rules of arrays validated with each: true', async () => {
+    class TagsDto {
+      @Matches(/^[a-z]/, { each: true })
+      @Matches(/\d$/, { each: true, message: i18nValidationMessage('users.digit') })
+      tags: string[];
+    }
+    const pipe = new I18nValidationPipe();
+    expect(await messages(pipe, TagsDto, { tags: ['a1', 'b'] })).toEqual(['tags needs a digit']);
+    expect(await messages(pipe, TagsDto, { tags: ['a1', '1'] })).toEqual([
+      'tags must match /^[a-z]/',
+    ]);
+  });
+
+  it('keeps the full path of nested properties', async () => {
+    class AccountDto {
+      @ValidateNested()
+      @Type(() => PasswordDto)
+      credentials: PasswordDto;
+    }
+    const pipe = new I18nValidationPipe({ transform: true });
+    expect(await messages(pipe, AccountDto, { credentials: { password: 'abcdefg1' } })).toEqual([
+      'credentials.password needs an uppercase letter',
+    ]);
+  });
+
+  it('keeps a plain custom message when its decorator failed', async () => {
+    class PinDto {
+      @Matches(/^.{4}$/, { message: i18nValidationMessage('users.pinLength') })
+      @Matches(/^\d+$/, { message: 'digits only' })
+      pin: string;
+    }
+    const pipe = new I18nValidationPipe();
+    expect(await messages(pipe, PinDto, { pin: '12a4' })).toEqual(['digits only']);
+    expect(await messages(pipe, PinDto, { pin: '12' })).toEqual(['pin needs 4 characters']);
+  });
+
+  it('when both fail, reports the rule ValidationPipe reports', async () => {
+    const control = await messages(new ValidationPipe(), PasswordDto, { password: 'abcdefgh' });
+    expect(control).toHaveLength(1);
+    expect(await messages(new I18nValidationPipe(), PasswordDto, { password: 'abcdefgh' })).toEqual(
+      control,
+    );
+  });
+
+  it("doesn't throw for the missing key of a decorator that passed", async () => {
+    class SloganDto {
+      @Matches(/\d/, { message: i18nValidationMessage('users.notThere' as never) })
+      @Matches(/[A-Z]/, { message: i18nValidationMessage('users.uppercase') })
+      slogan: string;
+    }
+    expect(await messages(new I18nValidationPipe(), SloganDto, { slogan: 'abc1' })).toEqual([
+      'slogan needs an uppercase letter',
+    ]);
   });
 });
