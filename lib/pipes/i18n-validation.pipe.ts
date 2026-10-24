@@ -50,6 +50,7 @@ export class I18nValidationPipe extends ValidationPipe {
       groups: validatorOptions?.groups,
       always: validatorOptions?.always,
       strictGroups: validatorOptions?.strictGroups,
+      dismissDefaultMessages: validatorOptions?.dismissDefaultMessages,
     });
 
     return validatorOptions?.validationError?.target === false ? withoutTargets(errors) : errors;

@@ -2,7 +2,10 @@ import type { StandardSchemaV1 } from '@standard-schema/spec';
 import type { ValidatorOptions } from 'class-validator';
 
 export interface TranslateValidationErrorsOptions
-  extends Pick<ValidatorOptions, 'groups' | 'always' | 'strictGroups'> {
+  extends Pick<
+    ValidatorOptions,
+    'groups' | 'always' | 'strictGroups' | 'dismissDefaultMessages'
+  > {
   /** Namespace for default constraint messages. Default `'validation'`. */
   namespace?: string;
 }

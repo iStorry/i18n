@@ -2,6 +2,7 @@ import type {
   getMetadataStorage as GetMetadataStorage,
   ValidationArguments,
   ValidationError,
+  ValidatorConstraintInterface,
 } from 'class-validator';
 import { createRequire } from 'node:module';
 import { i18nStorage } from '../context/i18n.storage.js';
@@ -115,7 +116,10 @@ function metadataStorage(): MetadataStorage {
  * `{path}`; plain custom strings are left alone. The decorator is found
  * through `error.target`, so errors without one (`validationError.target:
  * false`) are left as they are; `I18nValidationPipe` handles that option
- * itself. Pass the `groups`, `always` and `strictGroups` you validated with.
+ * itself. When a property has two decorators of one type (two `@Matches()`),
+ * the one that failed is the one whose rendered message class-validator
+ * stored; when that can't be told, its message is kept. Pass the `groups`,
+ * `always`, `strictGroups` and `dismissDefaultMessages` you validated with.
  * Outside a request, errors are returned as they are.
  */
 export function translateValidationErrors(
@@ -135,7 +139,14 @@ export function translateValidationErrors(
       const metadatas = byConstraintName(error, storage, options);
       const translated = new Set<string>();
       for (const name of Object.keys(error.constraints)) {
-        const metadata = metadatas.get(name);
+        const candidates = metadatas.get(name) ?? [];
+        const metadata =
+          candidates.length > 1
+            ? failedDecorator(error, error.constraints[name], candidates, storage, options)
+            : candidates[0];
+        if (candidates.length > 1 && !metadata) {
+          continue; // can't tell which decorator failed: keep class-validator's message
+        }
         const args = validationArgs(error.property, error.value, metadata?.constraints, path);
         const explicit = (metadata?.message as Partial<I18nValidationMessage> | undefined)?.[
           I18N_VALIDATION_MESSAGE
@@ -177,8 +188,8 @@ function byConstraintName(
   error: ValidationError,
   storage: MetadataStorage,
   { groups, always = false, strictGroups = false }: TranslateValidationErrorsOptions,
-): Map<string, MetadataLike> {
-  const map = new Map<string, MetadataLike>();
+): Map<string, MetadataLike[]> {
+  const map = new Map<string, MetadataLike[]>();
   const ctor = error.target?.constructor;
   if (!ctor) {
     return map;
@@ -194,9 +205,85 @@ function byConstraintName(
     const custom = m.constraintCls
       ? storage.getTargetValidatorConstraints(m.constraintCls)[0]?.name
       : undefined;
-    map.set(custom ?? m.type, m);
+    const name = custom ?? m.type;
+    map.set(name, [...(map.get(name) ?? []), m]);
   }
   return map;
+}
+
+/**
+ * class-validator keys `error.constraints` by name, so two decorators of one
+ * type on a property (two `@Matches()`) share a key that holds the message of
+ * the one that failed (the last one, when both did): the decorator whose
+ * message renders to it. Undefined when none does, e.g. for a message
+ * function that isn't pure.
+ */
+function failedDecorator(
+  error: ValidationError,
+  message: string,
+  candidates: MetadataLike[],
+  storage: MetadataStorage,
+  { dismissDefaultMessages = false }: TranslateValidationErrorsOptions,
+): MetadataLike | undefined {
+  const target = error.target as object;
+  return candidates.findLast((m) => {
+    const va: ValidationArguments = {
+      targetName: target.constructor?.name,
+      property: error.property,
+      object: target,
+      value: error.value,
+      constraints: m.constraints ?? [],
+    };
+    try {
+      return renderMessage(m, va, storage, dismissDefaultMessages) === message;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** The message class-validator's `createValidationError()` builds for `m`. */
+function renderMessage(
+  m: MetadataLike,
+  va: ValidationArguments,
+  storage: MetadataStorage,
+  dismissDefaultMessages: boolean,
+): string | undefined {
+  const store = i18nStorage.getStore()!;
+  const explicit = (m.message as Partial<I18nValidationMessage> | undefined)?.[
+    I18N_VALIDATION_MESSAGE
+  ];
+  // A key that doesn't exist would warn, or throw, for a decorator that passed.
+  if (explicit && !store.service.exists(explicit.key, store.locale)) {
+    return undefined;
+  }
+
+  let text: unknown = m.message;
+  if (typeof text === 'function') {
+    text = text(va);
+  } else if (!text && !dismissDefaultMessages && m.constraintCls) {
+    const instance = storage.getTargetValidatorConstraints(m.constraintCls)[0]?.instance as
+      | ValidatorConstraintInterface
+      | undefined;
+    text = instance?.defaultMessage?.(va);
+  }
+  return typeof text === 'string' && text ? replaceMessageTokens(text, va) : '';
+}
+
+/**
+ * class-validator's `ValidationUtils.replaceMessageSpecialTokens()` (0.14),
+ * which it doesn't export. Keep the two in step: a message rendered
+ * differently doesn't match, and keeps class-validator's text.
+ */
+function replaceMessageTokens(message: string, va: ValidationArguments): string {
+  let text = message;
+  va.constraints.forEach((c, i) => {
+    text = text.replace(new RegExp(`\\$constraint${i + 1}`, 'g'), constraintText(c));
+  });
+  if (['string', 'boolean', 'number'].includes(typeof va.value)) {
+    text = text.replace(/\$value/g, `${va.value}`);
+  }
+  return text.replace(/\$property/g, va.property).replace(/\$target/g, `${va.targetName}`);
 }
 
 /** Removes `target` from errors and their children, as class-validator does when it's off. */
